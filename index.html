@@ -754,8 +754,8 @@
 
     // 覆盖层
     if (paused && !over && !won) overlay("已暂停", "按 P 继续", "#f5c542");
-    if (over) overlay("游戏结束", "基地被摧毁 / 生命耗尽", "#ff5a5a");
-    if (won) overlay("胜利！", "所有敌人已被消灭", "#5ec46a");
+    if (over) overlay("游戏结束", "按 Enter 或 R 重新开始", "#ff5a5a");
+    if (won) overlay("胜利！", "按 Enter 或 R 进入下一关", "#5ec46a");
   }
 
   function overlay(title, sub, color) {
@@ -963,9 +963,19 @@
   // ---------- 游戏流程 ----------
   function startGame(lv = 1) {
     level = lv;
-    map = buildMap(lv);
     score = 0;
     lives = START_LIVES;
+    map = buildMap(lv);
+    resetRound();
+  }
+
+  function nextLevel() {
+    level++;
+    map = buildMap(level);
+    resetRound();
+  }
+
+  function resetRound() {
     enemies = [];
     bullets = [];
     particles = [];
@@ -978,10 +988,6 @@
     baseWallTimer = 0;
     gameTime = 0;
     spawnPlayer();
-  }
-
-  function nextLevel() {
-    startGame(level + 1);
   }
 
   document.getElementById("restart").addEventListener("click", () => startGame(1));
