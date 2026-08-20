@@ -125,6 +125,14 @@
   <div class="app">
     <div class="stage">
       <canvas id="game"></canvas>
+      <div class="choice-overlay" id="modePanel">
+        <div class="choice-box">
+          <h2>🎮 坦克大战</h2>
+          <p>选择游戏模式</p>
+          <button class="btn" id="btnNormal">普通模式</button>
+          <button class="btn secondary" id="btnEasy">简单模式</button>
+        </div>
+      </div>
       <div class="choice-overlay" id="choicePanel" style="display:none;">
         <div class="choice-box">
           <h2>🏆 通关！</h2>
@@ -144,8 +152,10 @@
       </div>
       <div class="card">
         <h2>通关记录</h2>
-        <div class="stat"><span class="label">通关次数</span><span class="value" id="clearCount">0</span></div>
-        <div class="stat"><span class="label">最短通关时长</span><span class="value" id="bestTime">--</span></div>
+        <div class="stat"><span class="label">简单 · 通关次数</span><span class="value" id="clearCountEasy">0</span></div>
+        <div class="stat"><span class="label">简单 · 最短时长</span><span class="value" id="bestTimeEasy">--</span></div>
+        <div class="stat"><span class="label">普通 · 通关次数</span><span class="value" id="clearCountNormal">0</span></div>
+        <div class="stat"><span class="label">普通 · 最短时长</span><span class="value" id="bestTimeNormal">--</span></div>
       </div>
       <div class="card">
         <h2>操作</h2>
@@ -157,7 +167,7 @@
         <div class="controls" id="padStatus" style="margin-top:8px;">🎮 Xbox 手柄：未连接</div>
       </div>
       <button class="btn" id="restart">重新开始</button>
-      <div class="tip">通关 5 关（第 5 关 BOSS）后可选无限模式</div>
+      <div class="tip">简单/普通可选 · 普通模式通关后可进入无限模式</div>
     </div>
   </div>
 
@@ -199,8 +209,10 @@
   const PLAYER_SPEED = 2.2;
   const PLAYER_FIRE_COOLDOWN = 0.28;
   const ENEMY_BULLET_SPEED = 2.0;
-  const BOSS_BULLET_SPEED = 3.5;
-  const BOSS_HP = 10;
+  const BOSS_SPEED = 0.9;            // Boss 移速与基础敌人一致
+  const BOSS_HP = 10;                // 普通模式 Boss 血量
+  const BOSS_HP_EASY = 5;            // 简单模式 Boss 血量
+  const ENEMIES_PER_LEVEL_EASY = 10; // 简单模式每关敌人
 
   // ---------- 状态 ----------
   let map = [];
@@ -221,31 +233,39 @@
   let gameTime = 0;
 
   // 关卡 / 模式 / 统计
-  let mode = 'campaign';       // 'campaign' | 'infinite'
+  let mode = 'campaign';       // 游戏阶段：'campaign' | 'infinite'
+  let gameMode = 'normal';     // 难度模式：'easy' | 'normal'
+  let menuOpen = true;         // 是否显示模式选择菜单
   let difficultyLevel = 1;     // 敌人强度等级（无限模式固定为 4）
   let boss = null;             // 第 5 关 Boss
   let campaignClear = false;   // 通关选择界面
   let campaignTime = 0;        // 本次战役累计游戏时长（秒）
-  let clearCount = 0;          // 通关次数（localStorage）
-  let bestTime = Infinity;     // 最短通关时长（秒，localStorage）
+  let stats = {                // 分模式通关统计
+    easy: { count: 0, best: Infinity },
+    normal: { count: 0, best: Infinity },
+  };
 
   // 玩家强化
   let playerPower = 0;         // 0..3
   let playerShieldUntil = 0;   // 护盾结束时间戳
   let baseWallTimer = 0;       // 铁铲加固剩余时间
 
-  // 通关统计（localStorage 持久化）
+  // 通关统计（localStorage 持久化，按模式分开）
   function loadStats() {
     try {
-      clearCount = parseInt(localStorage.getItem('tankClearCount') || '0', 10) || 0;
-      const bt = parseFloat(localStorage.getItem('tankBestTime') || '');
-      bestTime = (isFinite(bt) && bt > 0) ? bt : Infinity;
+      for (const m of ['easy', 'normal']) {
+        stats[m].count = parseInt(localStorage.getItem('tankClearCount_' + m) || '0', 10) || 0;
+        const bt = parseFloat(localStorage.getItem('tankBestTime_' + m) || '');
+        stats[m].best = (isFinite(bt) && bt > 0) ? bt : Infinity;
+      }
     } catch (e) {}
   }
   function saveStats() {
     try {
-      localStorage.setItem('tankClearCount', String(clearCount));
-      if (isFinite(bestTime)) localStorage.setItem('tankBestTime', String(bestTime));
+      for (const m of ['easy', 'normal']) {
+        localStorage.setItem('tankClearCount_' + m, String(stats[m].count));
+        if (isFinite(stats[m].best)) localStorage.setItem('tankBestTime_' + m, String(stats[m].best));
+      }
     } catch (e) {}
   }
   function formatTime(t) {
@@ -253,6 +273,12 @@
     const m = Math.floor(s / 60);
     const ss = s % 60;
     return m > 0 ? m + "分" + ss + "秒" : ss + "秒";
+  }
+  function enemiesPerLevel() {
+    return gameMode === 'easy' ? ENEMIES_PER_LEVEL_EASY : ENEMIES_PER_LEVEL;
+  }
+  function bossHp() {
+    return gameMode === 'easy' ? BOSS_HP_EASY : BOSS_HP;
   }
 
   // 输入
@@ -297,10 +323,11 @@
       return p && !prev;
     };
 
-    // 通关选择：A(0)/Start(9) 进入无限模式，B(1) 回到最初
+    // 通关选择：普通 A(0)/Start(9) 无限，B(1) 回到最初；简单全部回到最初
     if (campaignClear) {
-      if (edge(0) || edge(9)) enterInfiniteMode();
-      else if (edge(1)) returnToStart();
+      const a = edge(0), b = edge(1), st = edge(9);
+      if ((a || st) && gameMode !== 'easy') enterInfiniteMode();
+      else if (a || b || st) returnToStart();
       return;
     }
     // 暂停/继续：Start(9)
@@ -791,18 +818,20 @@
 
   // ---------- Boss ----------
   function spawnBoss() {
+    const hp = bossHp();
     boss = {
       x: 6 * TILE + (TILE - TANK_SIZE) / 2,
       y: 0,
       dir: DOWN,
       size: TANK_SIZE,
-      speed: PLAYER_SPEED,
-      hp: BOSS_HP,
-      maxHp: BOSS_HP,
+      speed: BOSS_SPEED,
+      hp,
+      maxHp: hp,
       color: "#c0392b",
       shootCooldown: 1.2,
       thinkTimer: 0,
       spawnProtect: 1.5,
+      targetTile: null,
       isBoss: true,
     };
   }
@@ -842,27 +871,99 @@
 
   function bossChase(b) {
     if (!player || player.dead) return b.dir;
-    const px = player.x + player.size / 2, py = player.y + player.size / 2;
-    const bx = b.x + b.size / 2, by = b.y + b.size / 2;
-    const dx = px - bx, dy = py - by;
-    const dist = Math.hypot(dx, dy);
-
-    // 玩家炮口正对 Boss 且距离较近 → 横向埋伏，脱离玩家弹道
-    const aligned =
-      (player.dir === UP && dy < -20 && Math.abs(dx) < 50) ||
-      (player.dir === DOWN && dy > 20 && Math.abs(dx) < 50) ||
-      (player.dir === LEFT && dx < -20 && Math.abs(dy) < 50) ||
-      (player.dir === RIGHT && dx > 20 && Math.abs(dy) < 50);
-    if (aligned && dist < 340) {
-      const side = Math.random() < 0.5 ? LEFT : RIGHT;
-      if (canStep(b, side)) return side;
-      if (canStep(b, side === LEFT ? RIGHT : LEFT)) return side === LEFT ? RIGHT : LEFT;
-    }
-
-    // 偶尔随机绕行，制造埋伏
-    if (Math.random() < 0.12) return (Math.random() * 4) | 0;
+    const dx = (player.x + player.size / 2) - (b.x + b.size / 2);
+    const dy = (player.y + player.size / 2) - (b.y + b.size / 2);
     if (Math.abs(dx) > Math.abs(dy)) return dx > 0 ? RIGHT : LEFT;
     return dy > 0 ? DOWN : UP;
+  }
+
+  // BFS 寻路（绕开砖墙/钢板/水/基地）
+  function findPath(sc, sr, ec, er) {
+    if (isSolidForTank(sc, sr) || isSolidForTank(ec, er)) return null;
+    const prev = new Map();
+    const visited = new Array(COLS * ROWS).fill(false);
+    const q = [sc + sr * COLS];
+    visited[sc + sr * COLS] = true;
+    const dirs = [[0, -1], [1, 0], [0, 1], [-1, 0]];
+    let head = 0;
+    while (head < q.length) {
+      const cur = q[head++];
+      const cc = cur % COLS, cr = Math.floor(cur / COLS);
+      if (cc === ec && cr === er) {
+        const path = [];
+        let n = cur;
+        while (n !== undefined) {
+          path.unshift({ c: n % COLS, r: Math.floor(n / COLS) });
+          n = prev.get(n);
+        }
+        return path;
+      }
+      for (const [dc, dr] of dirs) {
+        const nc = cc + dc, nr = cr + dr;
+        if (nc < 0 || nr < 0 || nc >= COLS || nr >= ROWS) continue;
+        const key = nc + nr * COLS;
+        if (visited[key] || isSolidForTank(nc, nr)) continue;
+        visited[key] = true;
+        prev.set(key, cur);
+        q.push(key);
+      }
+    }
+    return null;
+  }
+
+  // 选择追击目标（多数朝玩家，被玩家炮口对准时埋伏到侧方）
+  function bossChooseTarget(b) {
+    const pc = Math.floor((player.x + player.size / 2) / TILE);
+    const pr = Math.floor((player.y + player.size / 2) / TILE);
+    let tc = pc, tr = pr;
+    const dx = player.x - b.x, dy = player.y - b.y;
+    const dist = Math.hypot(dx, dy);
+    const aligned =
+      (player.dir === UP && dy > 20 && Math.abs(dx) < 60) ||
+      (player.dir === DOWN && dy < -20 && Math.abs(dx) < 60) ||
+      (player.dir === LEFT && dx > 20 && Math.abs(dy) < 60) ||
+      (player.dir === RIGHT && dx < -20 && Math.abs(dy) < 60);
+    if (aligned && dist < 320) {
+      const flip = Math.random() < 0.5 ? 1 : -1;
+      let sc = pc, sr = pr;
+      if (player.dir === UP || player.dir === DOWN) sc = pc + 2 * flip;
+      else sr = pr + 2 * flip;
+      if (sc >= 0 && sr >= 0 && sc < COLS && sr < ROWS && !isSolidForTank(sc, sr)) {
+        tc = sc; tr = sr;
+      }
+    }
+    return { tc, tr };
+  }
+
+  function bossPlanPath(b) {
+    const bc = Math.floor((b.x + b.size / 2) / TILE);
+    const br = Math.floor((b.y + b.size / 2) / TILE);
+    const { tc, tr } = bossChooseTarget(b);
+    const path = findPath(bc, br, tc, tr);
+    b.targetTile = (path && path.length >= 2) ? path[1] : null;
+  }
+
+  function bossMoveToTarget(b) {
+    if (!b.targetTile) return false;
+    const tx = b.targetTile.c * TILE + TILE / 2;
+    const ty = b.targetTile.r * TILE + TILE / 2;
+    const cx = b.x + b.size / 2, cy = b.y + b.size / 2;
+    const dx = tx - cx, dy = ty - cy;
+    const adx = Math.abs(dx), ady = Math.abs(dy);
+    if (adx < 3 && ady < 3) {
+      b.targetTile = null;
+      b.thinkTimer = 0; // 到达后立即重新规划
+      return true;
+    }
+    let moved = false;
+    if (adx >= ady) {
+      moved = stepInDir(b, dx > 0 ? RIGHT : LEFT);
+      if (!moved && ady > 3) moved = stepInDir(b, dy > 0 ? DOWN : UP);
+    } else {
+      moved = stepInDir(b, dy > 0 ? DOWN : UP);
+      if (!moved && adx > 3) moved = stepInDir(b, dx > 0 ? RIGHT : LEFT);
+    }
+    return moved;
   }
 
   function aimAtPlayer(b) {
@@ -879,7 +980,7 @@
     const m = (TANK_SIZE - BULLET_SIZE) / 2;
     const bx = b.x + m + (DX[b.dir] * (b.size / 2 - 2));
     const by = b.y + m + (DY[b.dir] * (b.size / 2 - 2));
-    bullets.push(makeBullet(bx, by, b.dir, false, 0, BOSS_BULLET_SPEED));
+    bullets.push(makeBullet(bx, by, b.dir, false, 0)); // 与普通敌人弹速一致
     sfx.shoot();
   }
 
@@ -889,20 +990,26 @@
     boss.thinkTimer -= dt;
     boss.spawnProtect = Math.max(0, boss.spawnProtect - dt);
 
-    // 移动方向：闪避 > 追击/埋伏 > 保持
-    let moveDir = boss.dir;
+    // 1) 闪避玩家子弹（最高优先级）
     const dodge = bossDodge(boss);
     if (dodge >= 0) {
-      moveDir = dodge;
-    } else if (boss.thinkTimer <= 0) {
-      boss.thinkTimer = 0.25 + Math.random() * 0.5;
-      moveDir = bossChase(boss);
-    }
-    if (!stepInDir(boss, moveDir)) {
-      if (dodge < 0) boss.thinkTimer = 0; // 撞墙立即重新决策
+      if (!stepInDir(boss, dodge)) stepInDir(boss, (dodge + 2) % 4);
+      boss.targetTile = null;
+    } else {
+      // 2) 寻路追击（绕开墙），被围时兜底朝玩家
+      if (boss.thinkTimer <= 0 || !boss.targetTile) {
+        boss.thinkTimer = 0.3;
+        bossPlanPath(boss);
+      }
+      if (boss.targetTile) {
+        if (!bossMoveToTarget(boss)) { boss.targetTile = null; boss.thinkTimer = 0; }
+      } else {
+        const dir = bossChase(boss);
+        if (!stepInDir(boss, dir)) boss.thinkTimer = 0;
+      }
     }
 
-    // 始终面向玩家并射击
+    // 3) 始终面向玩家并射击
     aimAtPlayer(boss);
     bossFire(boss);
   }
@@ -954,7 +1061,7 @@
 
     updateGamepad();
 
-    if (!paused && !over && !won && !campaignClear) {
+    if (!menuOpen && !paused && !over && !won && !campaignClear) {
       updatePlayer(dt);
       updateBoss(dt);
       updateEnemies(dt);
@@ -1235,8 +1342,10 @@
     else if (level === 5) levelEl.textContent = "5 · BOSS";
     else levelEl.textContent = level;
     document.getElementById("enemiesLeft").textContent = (level === 5) ? "BOSS" : (enemiesToSpawn + enemies.length);
-    document.getElementById("clearCount").textContent = clearCount;
-    document.getElementById("bestTime").textContent = isFinite(bestTime) ? formatTime(bestTime) : "--";
+    document.getElementById("clearCountEasy").textContent = stats.easy.count;
+    document.getElementById("bestTimeEasy").textContent = isFinite(stats.easy.best) ? formatTime(stats.easy.best) : "--";
+    document.getElementById("clearCountNormal").textContent = stats.normal.count;
+    document.getElementById("bestTimeNormal").textContent = isFinite(stats.normal.best) ? formatTime(stats.normal.best) : "--";
 
     const livesEl = document.getElementById("lives");
     livesEl.innerHTML = "";
@@ -1317,7 +1426,7 @@
       spawnTimer = 0;
       spawnBoss();
     } else {
-      enemiesToSpawn = ENEMIES_PER_LEVEL;
+      enemiesToSpawn = enemiesPerLevel();
       spawnTimer = 0.5;
     }
   }
@@ -1327,13 +1436,15 @@
     campaignClear = true;
     over = false;
     won = false;
-    clearCount++;
-    if (!isFinite(bestTime) || campaignTime < bestTime) bestTime = campaignTime;
+    const s = stats[gameMode];
+    s.count++;
+    if (!isFinite(s.best) || campaignTime < s.best) s.best = campaignTime;
     saveStats();
     showChoicePanel();
   }
 
   function enterInfiniteMode() {
+    if (gameMode === 'easy') return; // 简单模式无无限模式
     campaignClear = false;
     hideChoicePanel();
     mode = 'infinite';
@@ -1346,15 +1457,18 @@
 
   function returnToStart() {
     hideChoicePanel();
-    startGame(1);
+    showModePanel();
   }
 
   function showChoicePanel() {
     const el = document.getElementById("choicePanel");
     const statsEl = document.getElementById("choiceStats");
+    const infiniteBtn = document.getElementById("btnInfinite");
+    const s = stats[gameMode];
+    if (infiniteBtn) infiniteBtn.style.display = (gameMode === 'easy') ? "none" : "";
     if (statsEl) {
       statsEl.textContent = "本次通关用时 " + formatTime(campaignTime) +
-        "，累计通关 " + clearCount + " 次，最短 " + formatTime(bestTime);
+        "，累计通关 " + s.count + " 次，最短 " + formatTime(s.best);
     }
     if (el) el.style.display = "flex";
   }
@@ -1363,15 +1477,52 @@
     if (el) el.style.display = "none";
   }
 
-  document.getElementById("restart").addEventListener("click", () => startGame(1));
+  function showModePanel() {
+    const el = document.getElementById("modePanel");
+    if (el) el.style.display = "flex";
+    menuOpen = true;
+    campaignClear = false;
+    over = false;
+    won = false;
+    paused = false;
+  }
+  function hideModePanel() {
+    const el = document.getElementById("modePanel");
+    if (el) el.style.display = "none";
+    menuOpen = false;
+  }
+  function startWithMode(m) {
+    gameMode = m;
+    hideModePanel();
+    startGame(1);
+  }
+
+  // 隐藏测试：选完模式后输入 test 直接跳到 Boss 战
+  function jumpToBoss() {
+    if (menuOpen) return;
+    mode = 'campaign';
+    level = 5;
+    score = 0;
+    lives = START_LIVES;
+    campaignTime = 0;
+    campaignClear = false;
+    difficultyLevel = 4;
+    hideChoicePanel();
+    map = buildMap();
+    resetRound();
+  }
+
+  document.getElementById("restart").addEventListener("click", () => { hideModePanel(); startGame(1); });
   document.getElementById("btnInfinite").addEventListener("click", enterInfiniteMode);
   document.getElementById("btnRestart").addEventListener("click", returnToStart);
+  document.getElementById("btnEasy").addEventListener("click", () => startWithMode('easy'));
+  document.getElementById("btnNormal").addEventListener("click", () => startWithMode('normal'));
 
   // 键盘重启 / 下一关
   window.addEventListener("keydown", (e) => {
     if (campaignClear) {
-      if (e.code === "Enter") enterInfiniteMode();
-      else if (e.code === "KeyR") returnToStart();
+      if (e.code === "Enter" && gameMode !== 'easy') enterInfiniteMode();
+      else returnToStart();
       return;
     }
     if ((e.code === "Enter" || e.code === "KeyR") && (over || won)) {
@@ -1381,8 +1532,22 @@
 
   // ---------- 启动 ----------
   loadStats();
-  startGame(1);
+  map = buildMap(1);
+  resetRound();          // 初始化背景画面
+  showModePanel();       // 显示模式选择
   requestAnimationFrame((ts) => { last = ts; loop(ts); });
+
+  // 隐藏测试：选完模式后输入 test 直接跳到 Boss 战
+  let cheatBuffer = "";
+  window.addEventListener("keydown", (e) => {
+    if (e.repeat || !/^Key[A-Z]$/.test(e.code)) return;
+    cheatBuffer += e.code.slice(3).toLowerCase();
+    if (cheatBuffer.length > 12) cheatBuffer = cheatBuffer.slice(-12);
+    if (cheatBuffer.endsWith("test")) {
+      cheatBuffer = "";
+      jumpToBoss();
+    }
+  });
 })();
 </script>
 </body>
