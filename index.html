@@ -116,10 +116,11 @@
       <div class="card">
         <h2>操作</h2>
         <div class="controls">
-          <b>W A S D</b> / <b>方向键</b> 移动<br>
-          <b>空格</b> / <b>J</b> 射击<br>
-          <b>P</b> 暂停 &nbsp; <b>M</b> 静音
+          <b>W A S D</b> / <b>方向键</b> / <b>左摇杆</b> 移动<br>
+          <b>空格</b> / <b>J</b> / <b>A键</b> 射击<br>
+          <b>P</b> / <b>Start</b> 暂停 &nbsp; <b>M</b> 静音
         </div>
+        <div class="controls" id="padStatus" style="margin-top:8px;">🎮 Xbox 手柄：未连接</div>
       </div>
       <button class="btn" id="restart">重新开始</button>
       <div class="tip">守住基地，消灭所有敌人</div>
@@ -187,12 +188,70 @@
 
   // 输入
   const keys = new Set();
-  const keyToDir = {
-    ArrowUp: UP, KeyW: UP,
-    ArrowRight: RIGHT, KeyD: RIGHT,
-    ArrowDown: DOWN, KeyS: DOWN,
-    ArrowLeft: LEFT, KeyA: LEFT,
-  };
+
+  // 手柄（Xbox / 标准映射）
+  let gamepadConnected = false;
+  let gamepadIndex = null;
+  let gp = null;
+  let prevButtons = [];
+
+  window.addEventListener("gamepadconnected", (e) => {
+    gamepadConnected = true;
+    gamepadIndex = e.gamepad.index;
+    prevButtons = e.gamepad.buttons.map(b => b.pressed);
+  });
+  window.addEventListener("gamepaddisconnected", (e) => {
+    if (gamepadIndex === e.gamepad.index) {
+      gamepadConnected = false;
+      gamepadIndex = null;
+      gp = null;
+      prevButtons = [];
+    }
+  });
+
+  function updateGamepad() {
+    const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    let pad = null;
+    if (gamepadIndex != null) pad = pads[gamepadIndex] || null;
+    if (!pad) {
+      // 兼容页面加载前就已连接的手柄
+      pad = Array.from(pads).find(p => p && p.connected) || null;
+      if (pad) { gamepadIndex = pad.index; gamepadConnected = true; }
+    }
+    if (!pad) { gp = null; return; }
+    gp = pad;
+
+    const edge = (i) => {
+      const p = !!(pad.buttons[i] && pad.buttons[i].pressed);
+      const prev = prevButtons[i] || false;
+      prevButtons[i] = p;
+      return p && !prev;
+    };
+
+    // 暂停/继续：Start(9)
+    if (edge(9) && !over && !won) paused = !paused;
+    // 结束/胜利：A(0) 或 Start(9)
+    if ((over || won) && (edge(0) || edge(9))) {
+      if (won) nextLevel(); else startGame(1);
+    }
+  }
+
+  function gamepadDir(pad) {
+    const dead = 0.4;
+    let x = pad.axes[0] || 0;
+    let y = pad.axes[1] || 0;
+    if (Math.abs(x) < dead) x = 0;
+    if (Math.abs(y) < dead) y = 0;
+    // 十字键优先
+    if (pad.buttons[12] && pad.buttons[12].pressed) y = -1;
+    else if (pad.buttons[13] && pad.buttons[13].pressed) y = 1;
+    if (pad.buttons[14] && pad.buttons[14].pressed) x = -1;
+    else if (pad.buttons[15] && pad.buttons[15].pressed) x = 1;
+
+    if (Math.abs(x) > Math.abs(y)) return x > 0 ? RIGHT : LEFT;
+    if (Math.abs(y) > 0) return y > 0 ? DOWN : UP;
+    return -1;
+  }
 
   // ---------- 音频 ----------
   let audioCtx = null;
@@ -645,8 +704,17 @@
     else if (keys.has("ArrowLeft") || keys.has("KeyA")) dir = LEFT;
     else if (keys.has("ArrowRight") || keys.has("KeyD")) dir = RIGHT;
 
+    // 手柄方向（左摇杆 / 十字键，覆盖键盘）
+    if (gp) {
+      const gd = gamepadDir(gp);
+      if (gd >= 0) dir = gd;
+    }
+
     if (dir >= 0) moveTank(player, dir);
-    if (keys.has("Space") || keys.has("KeyJ")) fire(player);
+
+    const fireKey = keys.has("Space") || keys.has("KeyJ");
+    const firePad = gp && (gp.buttons[0].pressed || gp.buttons[2].pressed || gp.buttons[5].pressed);
+    if (fireKey || firePad) fire(player);
   }
 
   // ---------- 粒子 ----------
@@ -668,6 +736,8 @@
     last = ts;
     gameTime += dt;
     if (shake > 0) shake = Math.max(0, shake - dt * 20);
+
+    updateGamepad();
 
     if (!paused && !over && !won) {
       updatePlayer(dt);
@@ -938,6 +1008,17 @@
       const d = document.createElement("div");
       d.className = "life";
       livesEl.appendChild(d);
+    }
+
+    const padEl = document.getElementById("padStatus");
+    if (padEl) {
+      if (gamepadConnected) {
+        padEl.textContent = "🎮 Xbox 手柄：已连接";
+        padEl.style.color = "#5ec46a";
+      } else {
+        padEl.textContent = "🎮 Xbox 手柄：未连接";
+        padEl.style.color = "#8b96ad";
+      }
     }
   }
 
