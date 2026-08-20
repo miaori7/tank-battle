@@ -98,12 +98,41 @@
   }
   .btn:hover { filter: brightness(1.08); }
   .btn:active { transform: scale(.97); }
+  .btn.secondary { background: #2a3550; color: var(--text); }
+  .choice-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(6,8,14,0.82);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+  }
+  .choice-box {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 24px 28px;
+    text-align: center;
+    width: 300px;
+  }
+  .choice-box h2 { color: var(--accent); margin-bottom: 8px; }
+  .choice-box p { color: var(--muted); font-size: 13px; margin-bottom: 18px; line-height: 1.7; }
+  .choice-box .btn { width: 100%; margin-bottom: 10px; }
 </style>
 </head>
 <body>
   <div class="app">
     <div class="stage">
       <canvas id="game"></canvas>
+      <div class="choice-overlay" id="choicePanel" style="display:none;">
+        <div class="choice-box">
+          <h2>🏆 通关！</h2>
+          <p id="choiceStats"></p>
+          <button class="btn" id="btnInfinite">进入无限模式</button>
+          <button class="btn secondary" id="btnRestart">回到最初状态</button>
+        </div>
+      </div>
     </div>
     <div class="hud">
       <div class="card">
@@ -112,6 +141,11 @@
         <div class="stat"><span class="label">关卡</span><span class="value" id="level">1</span></div>
         <div class="stat"><span class="label">生命</span><span class="lives" id="lives"></span></div>
         <div class="stat"><span class="label">剩余敌人</span><span class="value" id="enemiesLeft">0</span></div>
+      </div>
+      <div class="card">
+        <h2>通关记录</h2>
+        <div class="stat"><span class="label">通关次数</span><span class="value" id="clearCount">0</span></div>
+        <div class="stat"><span class="label">最短通关时长</span><span class="value" id="bestTime">--</span></div>
       </div>
       <div class="card">
         <h2>操作</h2>
@@ -123,7 +157,7 @@
         <div class="controls" id="padStatus" style="margin-top:8px;">🎮 Xbox 手柄：未连接</div>
       </div>
       <button class="btn" id="restart">重新开始</button>
-      <div class="tip">守住基地，消灭所有敌人</div>
+      <div class="tip">通关 5 关（第 5 关 BOSS）后可选无限模式</div>
     </div>
   </div>
 
@@ -151,10 +185,10 @@
 
   // 敌人类型
   const ENEMY_TYPES = [
-    { name: "基础", hp: 1, speed: 1.1, points: 100, color: "#8f9bb0" },
-    { name: "快速", hp: 1, speed: 2.0, points: 200, color: "#5ec4a8" },
-    { name: "火力", hp: 2, speed: 1.3, points: 300, color: "#e6a23c", drops: true },
-    { name: "装甲", hp: 3, speed: 1.0, points: 400, color: "#b0b7c6" },
+    { name: "基础", hp: 1, speed: 0.9, points: 100, color: "#8f9bb0" },
+    { name: "快速", hp: 1, speed: 1.5, points: 200, color: "#5ec4a8" },
+    { name: "火力", hp: 2, speed: 1.1, points: 300, color: "#e6a23c", drops: true },
+    { name: "装甲", hp: 3, speed: 0.8, points: 400, color: "#b0b7c6" },
   ];
 
   const ENEMIES_PER_LEVEL = 20;
@@ -162,6 +196,11 @@
   const START_LIVES = 3;
   const TANK_SIZE = 40;
   const BULLET_SIZE = 8;
+  const PLAYER_SPEED = 2.2;
+  const PLAYER_FIRE_COOLDOWN = 0.28;
+  const ENEMY_BULLET_SPEED = 2.0;
+  const BOSS_BULLET_SPEED = 3.5;
+  const BOSS_HP = 10;
 
   // ---------- 状态 ----------
   let map = [];
@@ -181,10 +220,40 @@
   let shake = 0;
   let gameTime = 0;
 
+  // 关卡 / 模式 / 统计
+  let mode = 'campaign';       // 'campaign' | 'infinite'
+  let difficultyLevel = 1;     // 敌人强度等级（无限模式固定为 4）
+  let boss = null;             // 第 5 关 Boss
+  let campaignClear = false;   // 通关选择界面
+  let campaignTime = 0;        // 本次战役累计游戏时长（秒）
+  let clearCount = 0;          // 通关次数（localStorage）
+  let bestTime = Infinity;     // 最短通关时长（秒，localStorage）
+
   // 玩家强化
   let playerPower = 0;         // 0..3
   let playerShieldUntil = 0;   // 护盾结束时间戳
   let baseWallTimer = 0;       // 铁铲加固剩余时间
+
+  // 通关统计（localStorage 持久化）
+  function loadStats() {
+    try {
+      clearCount = parseInt(localStorage.getItem('tankClearCount') || '0', 10) || 0;
+      const bt = parseFloat(localStorage.getItem('tankBestTime') || '');
+      bestTime = (isFinite(bt) && bt > 0) ? bt : Infinity;
+    } catch (e) {}
+  }
+  function saveStats() {
+    try {
+      localStorage.setItem('tankClearCount', String(clearCount));
+      if (isFinite(bestTime)) localStorage.setItem('tankBestTime', String(bestTime));
+    } catch (e) {}
+  }
+  function formatTime(t) {
+    const s = Math.round(t);
+    const m = Math.floor(s / 60);
+    const ss = s % 60;
+    return m > 0 ? m + "分" + ss + "秒" : ss + "秒";
+  }
 
   // 输入
   const keys = new Set();
@@ -228,6 +297,12 @@
       return p && !prev;
     };
 
+    // 通关选择：A(0)/Start(9) 进入无限模式，B(1) 回到最初
+    if (campaignClear) {
+      if (edge(0) || edge(9)) enterInfiniteMode();
+      else if (edge(1)) returnToStart();
+      return;
+    }
     // 暂停/继续：Start(9)
     if (edge(9) && !over && !won) paused = !paused;
     // 结束/胜利：A(0) 或 Start(9)
@@ -375,7 +450,7 @@
     return {
       x, y, dir,
       size: TANK_SIZE,
-      speed: isPlayer ? 2.2 : type.speed,
+      speed: isPlayer ? PLAYER_SPEED : type.speed,
       isPlayer,
       type,
       hp: isPlayer ? 1 : type.hp,
@@ -386,8 +461,9 @@
     };
   }
 
-  function makeBullet(x, y, dir, isPlayer, power) {
-    return { x, y, dir, size: BULLET_SIZE, isPlayer, power, speed: isPlayer ? 4 + power : 3 };
+  function makeBullet(x, y, dir, isPlayer, power, speed) {
+    const spd = (speed !== undefined) ? speed : (isPlayer ? 4 + power : ENEMY_BULLET_SPEED);
+    return { x, y, dir, size: BULLET_SIZE, isPlayer, power, speed: spd };
   }
 
   function spawnPlayer() {
@@ -405,7 +481,7 @@
     // 根据关卡提高强力敌人比例
     let idx = 0;
     const r = Math.random();
-    const strong = Math.min(level * 0.15, 0.6);
+    const strong = Math.min(difficultyLevel * 0.15, 0.6);
     if (r > 1 - strong) idx = 3;
     else if (r > 1 - strong - 0.25) idx = 2;
     else if (r < 0.3) idx = 1;
@@ -424,11 +500,13 @@
     if (nx < 0 || ny < 0 || nx + tank.size > W || ny + tank.size > H) return true;
     // 地图
     if (rectHitsMap(nx, ny, tank.size, isSolidForTank)) return true;
-    // 其他坦克
-    const others = tank.isPlayer ? enemies : [player, ...enemies];
-    for (const o of others) {
-      if (!o || o === tank) continue;
-      if (rectsOverlap({ x: nx, y: ny, size: tank.size }, { x: o.x, y: o.y, size: o.size })) return true;
+    // 其他坦克（含 Boss）
+    const test = { x: nx, y: ny, size: tank.size };
+    if (tank !== player && player && !player.dead && rectsOverlap(test, player)) return true;
+    if (tank !== boss && boss && !boss.dead && rectsOverlap(test, boss)) return true;
+    for (const o of enemies) {
+      if (o === tank || o.dead) continue;
+      if (rectsOverlap(test, o)) return true;
     }
     return false;
   }
@@ -464,7 +542,7 @@
 
   function fire(tank) {
     if (tank.shootCooldown > 0) return;
-    tank.shootCooldown = tank.isPlayer ? 0.28 : 0.9 + Math.random() * 1.2;
+    tank.shootCooldown = tank.isPlayer ? PLAYER_FIRE_COOLDOWN : 0.9 + Math.random() * 1.2;
     const m = (TANK_SIZE - BULLET_SIZE) / 2;
     const bx = tank.x + m + (DX[tank.dir] * (tank.size / 2 - 2));
     const by = tank.y + m + (DY[tank.dir] * (tank.size / 2 - 2));
@@ -524,11 +602,16 @@
 
       // 打中坦克
       if (b.isPlayer) {
-        for (const e of enemies) {
-          if (rectsOverlap(b, e)) {
-            b.dead = true;
-            hitEnemy(e);
-            break;
+        if (boss && !boss.dead && rectsOverlap(b, boss)) {
+          b.dead = true;
+          hitBoss();
+        } else {
+          for (const e of enemies) {
+            if (rectsOverlap(b, e)) {
+              b.dead = true;
+              hitEnemy(e);
+              break;
+            }
           }
         }
       } else {
@@ -566,6 +649,20 @@
     } else {
       explode(e.x + e.size / 2, e.y + e.size / 2);
       sfx.hit();
+    }
+  }
+
+  function hitBoss() {
+    if (!boss || boss.dead) return;
+    boss.hp--;
+    if (boss.hp <= 0) {
+      boss.dead = true;
+      score += 1000;
+      explode(boss.x + boss.size / 2, boss.y + boss.size / 2, true);
+      shake = 12;
+      onCampaignClear();
+    } else {
+      explode(boss.x + boss.size / 2, boss.y + boss.size / 2);
     }
   }
 
@@ -687,9 +784,127 @@
         }
       }
     }
-    if (enemiesToSpawn <= 0 && enemies.length === 0 && !over) {
+    if (enemiesToSpawn <= 0 && enemies.length === 0 && !over && !boss) {
       won = true;
     }
+  }
+
+  // ---------- Boss ----------
+  function spawnBoss() {
+    boss = {
+      x: 6 * TILE + (TILE - TANK_SIZE) / 2,
+      y: 0,
+      dir: DOWN,
+      size: TANK_SIZE,
+      speed: PLAYER_SPEED,
+      hp: BOSS_HP,
+      maxHp: BOSS_HP,
+      color: "#c0392b",
+      shootCooldown: 1.2,
+      thinkTimer: 0,
+      spawnProtect: 1.5,
+      isBoss: true,
+    };
+  }
+
+  function canStep(tank, dir) {
+    return !tankBlocked(tank, tank.x + DX[dir] * tank.speed, tank.y + DY[dir] * tank.speed);
+  }
+  function stepInDir(tank, dir) {
+    if (canStep(tank, dir)) {
+      tank.x += DX[dir] * tank.speed;
+      tank.y += DY[dir] * tank.speed;
+      return true;
+    }
+    return false;
+  }
+
+  function bossDodge(b) {
+    const bcx = b.x + b.size / 2, bcy = b.y + b.size / 2;
+    let best = null, bestDist = 220;
+    for (const bl of bullets) {
+      if (!bl.isPlayer) continue;
+      const dx = bcx - (bl.x + bl.size / 2);
+      const dy = bcy - (bl.y + bl.size / 2);
+      const dist = Math.hypot(dx, dy);
+      if (dist > 220 || dist < 1) continue;
+      const dot = DX[bl.dir] * dx + DY[bl.dir] * dy;
+      if (dot > 0 && Math.abs(dot) / dist > 0.6) {
+        if (dist < bestDist) { bestDist = dist; best = bl; }
+      }
+    }
+    if (!best) return -1;
+    const p1 = (best.dir + 1) % 4, p2 = (best.dir + 3) % 4;
+    if (canStep(b, p1)) return p1;
+    if (canStep(b, p2)) return p2;
+    return -1;
+  }
+
+  function bossChase(b) {
+    if (!player || player.dead) return b.dir;
+    const px = player.x + player.size / 2, py = player.y + player.size / 2;
+    const bx = b.x + b.size / 2, by = b.y + b.size / 2;
+    const dx = px - bx, dy = py - by;
+    const dist = Math.hypot(dx, dy);
+
+    // 玩家炮口正对 Boss 且距离较近 → 横向埋伏，脱离玩家弹道
+    const aligned =
+      (player.dir === UP && dy < -20 && Math.abs(dx) < 50) ||
+      (player.dir === DOWN && dy > 20 && Math.abs(dx) < 50) ||
+      (player.dir === LEFT && dx < -20 && Math.abs(dy) < 50) ||
+      (player.dir === RIGHT && dx > 20 && Math.abs(dy) < 50);
+    if (aligned && dist < 340) {
+      const side = Math.random() < 0.5 ? LEFT : RIGHT;
+      if (canStep(b, side)) return side;
+      if (canStep(b, side === LEFT ? RIGHT : LEFT)) return side === LEFT ? RIGHT : LEFT;
+    }
+
+    // 偶尔随机绕行，制造埋伏
+    if (Math.random() < 0.12) return (Math.random() * 4) | 0;
+    if (Math.abs(dx) > Math.abs(dy)) return dx > 0 ? RIGHT : LEFT;
+    return dy > 0 ? DOWN : UP;
+  }
+
+  function aimAtPlayer(b) {
+    if (!player || player.dead) return;
+    const px = player.x + player.size / 2, py = player.y + player.size / 2;
+    const bx = b.x + b.size / 2, by = b.y + b.size / 2;
+    const dx = px - bx, dy = py - by;
+    b.dir = (Math.abs(dx) > Math.abs(dy)) ? (dx > 0 ? RIGHT : LEFT) : (dy > 0 ? DOWN : UP);
+  }
+
+  function bossFire(b) {
+    if (b.shootCooldown > 0) return;
+    b.shootCooldown = PLAYER_FIRE_COOLDOWN; // 与玩家射速一致
+    const m = (TANK_SIZE - BULLET_SIZE) / 2;
+    const bx = b.x + m + (DX[b.dir] * (b.size / 2 - 2));
+    const by = b.y + m + (DY[b.dir] * (b.size / 2 - 2));
+    bullets.push(makeBullet(bx, by, b.dir, false, 0, BOSS_BULLET_SPEED));
+    sfx.shoot();
+  }
+
+  function updateBoss(dt) {
+    if (!boss || boss.dead) return;
+    boss.shootCooldown -= dt;
+    boss.thinkTimer -= dt;
+    boss.spawnProtect = Math.max(0, boss.spawnProtect - dt);
+
+    // 移动方向：闪避 > 追击/埋伏 > 保持
+    let moveDir = boss.dir;
+    const dodge = bossDodge(boss);
+    if (dodge >= 0) {
+      moveDir = dodge;
+    } else if (boss.thinkTimer <= 0) {
+      boss.thinkTimer = 0.25 + Math.random() * 0.5;
+      moveDir = bossChase(boss);
+    }
+    if (!stepInDir(boss, moveDir)) {
+      if (dodge < 0) boss.thinkTimer = 0; // 撞墙立即重新决策
+    }
+
+    // 始终面向玩家并射击
+    aimAtPlayer(boss);
+    bossFire(boss);
   }
 
   // ---------- 玩家 ----------
@@ -739,13 +954,15 @@
 
     updateGamepad();
 
-    if (!paused && !over && !won) {
+    if (!paused && !over && !won && !campaignClear) {
       updatePlayer(dt);
+      updateBoss(dt);
       updateEnemies(dt);
       updateBullets(dt);
       updatePowerups();
       updateSpawns(dt);
       updateParticles(dt);
+      campaignTime += dt;
 
       // 基地墙加固恢复
       if (baseWallTimer && gameTime > baseWallTimer) {
@@ -805,6 +1022,7 @@
     // 坦克
     if (player && !player.dead) drawTank(player);
     for (const e of enemies) if (!e.dead) drawTank(e);
+    if (boss && !boss.dead) { drawTank(boss); drawBossBar(boss); }
 
     // 子弹
     for (const b of bullets) {
@@ -823,7 +1041,7 @@
     ctx.restore();
 
     // 覆盖层
-    if (paused && !over && !won) overlay("已暂停", "按 P 继续", "#f5c542");
+    if (paused && !over && !won && !campaignClear) overlay("已暂停", "按 P 继续", "#f5c542");
     if (over) overlay("游戏结束", "按 Enter 或 R 重新开始", "#ff5a5a");
     if (won) overlay("胜利！", "按 Enter 或 R 进入下一关", "#5ec46a");
   }
@@ -968,6 +1186,19 @@
     ctx.restore();
   }
 
+  function drawBossBar(b) {
+    const w = b.size;
+    const x = b.x, y = b.y - 14;
+    ctx.fillStyle = "rgba(0,0,0,0.6)";
+    ctx.fillRect(x - 2, y - 2, w + 4, 9);
+    const ratio = Math.max(0, b.hp / b.maxHp);
+    ctx.fillStyle = ratio > 0.5 ? "#5ec46a" : (ratio > 0.25 ? "#f5c542" : "#ff5a5a");
+    ctx.fillRect(x, y, w * ratio, 5);
+    ctx.strokeStyle = "#000";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x - 2, y - 2, w + 4, 9);
+  }
+
   function shade(hex, amt) {
     const n = parseInt(hex.slice(1), 16);
     let r = (n >> 16) + amt, g = ((n >> 8) & 0xff) + amt, b = (n & 0xff) + amt;
@@ -999,8 +1230,13 @@
   // ---------- HUD ----------
   function updateHUD() {
     document.getElementById("score").textContent = score;
-    document.getElementById("level").textContent = level;
-    document.getElementById("enemiesLeft").textContent = enemiesToSpawn + enemies.length;
+    const levelEl = document.getElementById("level");
+    if (mode === 'infinite') levelEl.textContent = "∞";
+    else if (level === 5) levelEl.textContent = "5 · BOSS";
+    else levelEl.textContent = level;
+    document.getElementById("enemiesLeft").textContent = (level === 5) ? "BOSS" : (enemiesToSpawn + enemies.length);
+    document.getElementById("clearCount").textContent = clearCount;
+    document.getElementById("bestTime").textContent = isFinite(bestTime) ? formatTime(bestTime) : "--";
 
     const livesEl = document.getElementById("lives");
     livesEl.innerHTML = "";
@@ -1025,7 +1261,7 @@
   // ---------- 输入 ----------
   window.addEventListener("keydown", (e) => {
     if (e.code === "Space") e.preventDefault();
-    if (e.code === "KeyP" && !e.repeat) { if (!over && !won) paused = !paused; return; }
+    if (e.code === "KeyP" && !e.repeat) { if (!over && !won && !campaignClear) paused = !paused; return; }
     if (e.code === "KeyM" && !e.repeat) { muted = !muted; return; }
     keys.add(e.code);
   });
@@ -1044,14 +1280,21 @@
   // ---------- 游戏流程 ----------
   function startGame(lv = 1) {
     level = lv;
+    mode = 'campaign';
+    difficultyLevel = lv;
     score = 0;
     lives = START_LIVES;
+    campaignTime = 0;
+    campaignClear = false;
+    hideChoicePanel();
     map = buildMap(lv);
     resetRound();
   }
 
   function nextLevel() {
     level++;
+    lives = START_LIVES;           // 每关完成血量恢复
+    difficultyLevel = (mode === 'infinite') ? 4 : Math.min(level, 4);
     map = buildMap(level);
     resetRound();
   }
@@ -1061,26 +1304,83 @@
     bullets = [];
     particles = [];
     powerups = [];
-    enemiesToSpawn = ENEMIES_PER_LEVEL;
-    spawnTimer = 0.5;
+    boss = null;
     over = false;
     won = false;
+    campaignClear = false;
     paused = false;
     baseWallTimer = 0;
     gameTime = 0;
     spawnPlayer();
+    if (level === 5) {
+      enemiesToSpawn = 0;
+      spawnTimer = 0;
+      spawnBoss();
+    } else {
+      enemiesToSpawn = ENEMIES_PER_LEVEL;
+      spawnTimer = 0.5;
+    }
+  }
+
+  function onCampaignClear() {
+    if (campaignClear) return;
+    campaignClear = true;
+    over = false;
+    won = false;
+    clearCount++;
+    if (!isFinite(bestTime) || campaignTime < bestTime) bestTime = campaignTime;
+    saveStats();
+    showChoicePanel();
+  }
+
+  function enterInfiniteMode() {
+    campaignClear = false;
+    hideChoicePanel();
+    mode = 'infinite';
+    level++;
+    difficultyLevel = 4;
+    lives = START_LIVES;
+    map = buildMap();
+    resetRound();
+  }
+
+  function returnToStart() {
+    hideChoicePanel();
+    startGame(1);
+  }
+
+  function showChoicePanel() {
+    const el = document.getElementById("choicePanel");
+    const statsEl = document.getElementById("choiceStats");
+    if (statsEl) {
+      statsEl.textContent = "本次通关用时 " + formatTime(campaignTime) +
+        "，累计通关 " + clearCount + " 次，最短 " + formatTime(bestTime);
+    }
+    if (el) el.style.display = "flex";
+  }
+  function hideChoicePanel() {
+    const el = document.getElementById("choicePanel");
+    if (el) el.style.display = "none";
   }
 
   document.getElementById("restart").addEventListener("click", () => startGame(1));
+  document.getElementById("btnInfinite").addEventListener("click", enterInfiniteMode);
+  document.getElementById("btnRestart").addEventListener("click", returnToStart);
 
   // 键盘重启 / 下一关
   window.addEventListener("keydown", (e) => {
+    if (campaignClear) {
+      if (e.code === "Enter") enterInfiniteMode();
+      else if (e.code === "KeyR") returnToStart();
+      return;
+    }
     if ((e.code === "Enter" || e.code === "KeyR") && (over || won)) {
       if (won) nextLevel(); else startGame(1);
     }
   });
 
   // ---------- 启动 ----------
+  loadStats();
   startGame(1);
   requestAnimationFrame((ts) => { last = ts; loop(ts); });
 })();
